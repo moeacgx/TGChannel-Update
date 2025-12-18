@@ -160,12 +160,24 @@ async function handleMyChatMember(event, state, env, adminIds) {
   // 不把通知群/频道加入监听列表
   if (env.TARGET_CHAT_ID && Number(chat.id) === Number(env.TARGET_CHAT_ID)) return;
   const status = new_chat_member.status;
+  const chatName = chat.title ?? chat.username ?? chat.id;
+  const alreadyExists = !!state.channels[chat.id];
+
   if (status === "administrator" || status === "member") {
-    ensureChannel(state, chat);
-    await notifyAdmins(env, adminIds, `${chat.title ?? chat.username ?? chat.id} 已加入监听列表`);
+    // 只有新加入时才通知，避免重复通知
+    if (!alreadyExists) {
+      ensureChannel(state, chat);
+      await notifyAdmins(env, adminIds, `${chatName} 已加入监听列表`);
+    } else {
+      // 已存在，只更新标题（如果变了）
+      ensureChannel(state, chat);
+    }
   } else if (status === "left" || status === "kicked") {
-    delete state.channels[chat.id];
-    await notifyAdmins(env, adminIds, `${chat.title ?? chat.username ?? chat.id} 已移除监听列表`);
+    // 只有确实存在时才删除并通知
+    if (alreadyExists) {
+      delete state.channels[chat.id];
+      await notifyAdmins(env, adminIds, `${chatName} 已移除监听列表`);
+    }
   }
 }
 
