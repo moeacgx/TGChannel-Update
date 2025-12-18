@@ -5,6 +5,7 @@
 // - TARGET_CHAT_ID: 目标通知频道/群 ID（例如 -1001234567890）
 // - ADMIN_IDS: 允许使用管理命令的用户 ID，逗号分隔
 // - STATE_KV: 绑定的 KV 命名空间（wrangler.toml 中配置 binding = "STATE_KV"）
+// - KICK_API_KEY: 外部踢人接口的 API 密钥（用于 /api/kick 端点）
 
 const STATE_KEY = "state:v1";
 
@@ -17,6 +18,15 @@ export default {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // 路由分发：/api/kick 为外部踢人接口
+    if (path === "/api/kick") {
+      return await handleKickRequest(request, env);
+    }
+
+    // 默认：Telegram Webhook 处理
     const update = await request.json();
     const adminIds = parseAdminIds(env.ADMIN_IDS);
     const state = await loadState(env);
@@ -39,6 +49,96 @@ export default {
     return jsonOk();
   },
 };
+
+/**
+ * 处理外部踢人请求
+ * POST /api/kick
+ * Header: X-API-Key: <KICK_API_KEY>
+ * Body: { "user_id": 123456789 }
+ */
+async function handleKickRequest(request, env) {
+  // 验证 API Key
+  const apiKey = request.headers.get("X-API-Key");
+  if (!env.KICK_API_KEY || apiKey !== env.KICK_API_KEY) {
+    return jsonError("Unauthorized", 401);
+  }
+
+  // 解析请求体
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonError("Invalid JSON body", 400);
+  }
+
+  const userId = body.user_id;
+  if (!userId) {
+    return jsonError("Missing user_id", 400);
+  }
+
+  // 加载状态，获取所有监听的频道
+  const state = await loadState(env);
+  const channelIds = Object.keys(state.channels);
+
+  if (channelIds.length === 0) {
+    return jsonResult({ success: true, message: "No channels to kick from", results: [] });
+  }
+
+  // 遍历所有频道执行踢人
+  const results = await Promise.all(
+    channelIds.map(async (chatId) => {
+      const channel = state.channels[chatId];
+      const result = await kickUserFromChat(env, chatId, userId);
+      return {
+        chat_id: chatId,
+        title: channel.title,
+        success: result.ok,
+        error: result.ok ? null : result.description,
+      };
+    })
+  );
+
+  const successCount = results.filter((r) => r.success).length;
+  const failCount = results.length - successCount;
+
+  return jsonResult({
+    success: true,
+    message: `Kicked user ${userId} from ${successCount}/${results.length} channels`,
+    summary: { total: results.length, success: successCount, failed: failCount },
+    results,
+  });
+}
+
+/**
+ * 从指定频道/群踢出用户
+ */
+async function kickUserFromChat(env, chatId, userId) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      user_id: userId,
+      revoke_messages: false, // 不删除历史消息
+    }),
+  });
+  return await res.json();
+}
+
+function jsonError(message, status = 400) {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function jsonResult(data) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 function parseAdminIds(raw) {
   if (!raw) return [];
